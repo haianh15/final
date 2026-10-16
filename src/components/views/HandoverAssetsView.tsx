@@ -313,6 +313,8 @@ export const HandoverAssetsView: React.FC = () => {
   const matchingSettlementSlip = settlementSlips.find(s => s.roomCode === selectedRoomCode);
   const [bg10WaitingReason, setBg10WaitingReason] = useState('');
   const [showQT05DetailModal, setShowQT05DetailModal] = useState(false);
+  const [bg10SaveError, setBg10SaveError] = useState<string | null>(null);
+  const [bg10SimulateSaveFailure, setBg10SimulateSaveFailure] = useState(false);
 
   // ==================== STATE UC-BG11: HOÀN THIỆN BIÊN BẢN TRẢ PHÒNG ====================
   const [bg11TenantSigned, setBg11TenantSigned] = useState<'Khách đã ký' | 'Chưa ký' | 'Khách không ký'>(
@@ -374,6 +376,67 @@ export const HandoverAssetsView: React.FC = () => {
       setStep318Transferred(false);
     }
     setBg07SaveError(null);
+
+    // Sync BG08 & BG11
+    const retReport = handoverReturnReports.find(r => r.roomCode === roomCode);
+    const rmContract = contracts.find(c => c.roomCode === roomCode && (c.status === 'Hiệu lực' || c.status === 'Chờ hiệu lực'));
+    if (retReport) {
+      setBg08Date(retReport.date);
+      setBg08Giver(retReport.giverName);
+      setBg08Receiver(retReport.receiverName);
+      setBg08Place(retReport.handoverPlace || 'Tại phòng ' + roomCode + ', Chung cư BlueHouse');
+      setBg08Notes(retReport.initialConditionNotes || '');
+      setBg08SelectedContractId(retReport.contractId || rmContract?.id || '');
+      setBg11TenantSigned(retReport.tenantSignedPaper || 'Khách đã ký');
+      setBg11NotSignReason(retReport.tenantNotSignReason || 'Không cung cấp lý do');
+      setBg11NotSignExchangeInfo(retReport.tenantNotSignExchangeInfo || 'Đã gọi điện thoại và gửi tin nhắn Zalo thông báo kết quả đối chiếu.');
+      setBg11OwnerSigned(retReport.ownerSignedPaper === 'Đã ký');
+      setBg11PaperLocation(retReport.paperLocation || 'Tủ hồ sơ tầng 1 - Kẹp trả phòng ' + roomCode);
+      setBg11ScanUrl(retReport.signedDocumentScanUrl || '');
+    } else {
+      setBg08Date(new Date().toISOString().substring(0, 10));
+      setBg08SelectedContractId(rmContract?.id || '');
+      setBg08Giver(rmContract?.tenantName || 'Trần Văn Bình');
+      setBg08Receiver(currentUser?.fullName || 'Nguyễn Văn An');
+      setBg08Place('Tại phòng ' + roomCode + ', Chung cư BlueHouse');
+      setBg08Notes('Biên bản lập căn cứ vào kết quả bàn giao nhận phòng và kiểm tra thực tế.');
+      setBg11TenantSigned('Khách đã ký');
+      setBg11NotSignReason('Không cung cấp lý do');
+      setBg11NotSignExchangeInfo('Đã gọi điện thoại và gửi tin nhắn Zalo thông báo kết quả đối chiếu.');
+      setBg11OwnerSigned(false);
+      setBg11PaperLocation('Tủ hồ sơ tầng 1 - Kẹp trả phòng ' + roomCode);
+      setBg11ScanUrl('');
+    }
+
+    // Sync BG09
+    const insp = returnInspections.find(i => i.roomCode === roomCode);
+    if (insp) {
+      setBg09InspectionDate(insp.inspectionDate || new Date().toISOString().substring(0, 10));
+      setBg09Step304Status(insp.step304Status || 'Đã nhận lại');
+      setBg09IncompleteReason(insp.incompleteReason || '');
+      setBg09FinalElec(insp.finalElectricityKwh || 1420);
+      setBg09FinalWater(insp.finalWaterM3 || 58);
+      setBg09Evidence(insp.step305Evidence || 'Khách đã giao đủ 02 chùm chìa khóa và thẻ thang máy tại phòng.');
+      setBg09EvidencePhotos(insp.step305EvidencePhotos || []);
+      setBg09EvidenceVideoUrl(insp.step305EvidenceVideoUrl || '');
+      if (insp.items && insp.items.length > 0) {
+        setBg09Items(insp.items);
+      }
+    } else {
+      setBg09InspectionDate(new Date().toISOString().substring(0, 10));
+      setBg09Step304Status('Đã nhận lại');
+      setBg09IncompleteReason('');
+      setBg09FinalElec(1420);
+      setBg09FinalWater(58);
+      setBg09Evidence('Khách đã giao đủ 02 chùm chìa khóa và thẻ thang máy tại phòng.');
+      setBg09Items(standardAssets.map(ast => ({
+        name: ast.name,
+        inspected: true,
+        quantity: ast.standardQuantity,
+        condition: 'Bình thường',
+        reasonIfNotInspected: ''
+      })));
+    }
   };
 
   // Compute quantityDiff based on standard and actual
@@ -2721,6 +2784,17 @@ export const HandoverAssetsView: React.FC = () => {
               </div>
             )}
 
+            {/* EF-01: Không tìm thấy phòng hoặc hồ sơ thuê cần trả */}
+            {contracts.filter(c => c.roomCode === selectedRoomCode).length === 0 && (
+              <div className="p-3.5 bg-rose-50 border border-rose-300 rounded-xl text-rose-900 text-xs flex items-start gap-2.5 shadow-sm">
+                <AlertOctagon className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                <div className="space-y-1">
+                  <strong className="block font-bold">EF-01: Không tìm thấy hợp đồng hoặc hồ sơ thuê cần trả cho phòng {selectedRoomCode}</strong>
+                  <p>Hệ thống không tạo biên bản trả phòng khi thiếu dữ liệu hồ sơ thuê nguồn. Vui lòng chọn lại phòng có hợp đồng liên quan.</p>
+                </div>
+              </div>
+            )}
+
             {/* AF-01 Existing Report Notice */}
             {existingReturnReport && (
               <div className="p-3 bg-blue-50 border border-blue-200 rounded-xl text-blue-900 text-[11px] flex items-center justify-between">
@@ -2988,6 +3062,25 @@ export const HandoverAssetsView: React.FC = () => {
                 </div>
               )}
             </div>
+
+            {/* EF-01: Không tìm thấy biên bản trả phòng đang xử lý */}
+            {!existingReturnReport && (
+              <div className="p-3.5 bg-amber-50 border border-amber-300 rounded-xl text-amber-900 text-xs flex items-start gap-2.5 shadow-sm">
+                <AlertCircle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                <div className="space-y-1">
+                  <strong className="block font-bold">EF-01: Chưa tìm thấy biên bản trả phòng đang xử lý (UC-BG08)</strong>
+                  <p>
+                    Quy trình yêu cầu khởi tạo biên bản trả phòng tại UC-BG08 trước khi ghi nhận kết quả nhận lại thực tế.
+                  </p>
+                  <button
+                    onClick={() => setActiveTab('init_report_bg08')}
+                    className="mt-1 px-3 py-1 bg-amber-600 hover:bg-amber-700 text-white rounded font-semibold cursor-pointer"
+                  >
+                    Chuyển sang Khởi tạo biên bản trả phòng (UC-BG08)
+                  </button>
+                </div>
+              </div>
+            )}
 
             {/* Status overview */}
             <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl grid grid-cols-2 md:grid-cols-4 gap-3 text-slate-700">
