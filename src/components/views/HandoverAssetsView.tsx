@@ -43,7 +43,8 @@ import {
   Calendar,
   DollarSign,
   FileCheck2,
-  FolderOpen
+  FolderOpen,
+  RefreshCw
 } from 'lucide-react';
 
 export const HandoverAssetsView: React.FC = () => {
@@ -257,9 +258,16 @@ export const HandoverAssetsView: React.FC = () => {
   const [newContactResult, setNewContactResult] = useState('');
   const [newContactEvidence, setNewContactEvidence] = useState('');
 
+  // UC-BG07 AF-03, EF-04, EF-05 & EF-06
+  const [showAF03SettlementModal, setShowAF03SettlementModal] = useState(false);
+  const [step318Transferred, setStep318Transferred] = useState(false);
+  const [bg07SaveError, setBg07SaveError] = useState<string | null>(null);
+  const [bg07SimulateSaveFailure, setBg07SimulateSaveFailure] = useState(false);
+
   // ==================== STATE UC-BG08: KHỞI TẠO BIÊN BẢN TRẢ PHÒNG ====================
   const existingReturnReport = handoverReturnReports.find(r => r.roomCode === selectedRoomCode);
   const [bg08Date, setBg08Date] = useState(new Date().toISOString().substring(0, 10));
+  const [bg08SelectedContractId, setBg08SelectedContractId] = useState(targetContract?.id || '');
   const [bg08Giver, setBg08Giver] = useState(selectedRoom.currentTenantName || 'Trần Văn Bình');
   const [bg08Receiver, setBg08Receiver] = useState(currentUser?.fullName || 'Nguyễn Văn An');
   const [bg08Place, setBg08Place] = useState('Tại phòng ' + selectedRoomCode + ', Chung cư BlueHouse');
@@ -299,10 +307,12 @@ export const HandoverAssetsView: React.FC = () => {
   const [correctionNewStatus, setCorrectionNewStatus] = useState<'Đã nhận lại' | 'Chưa nhận lại'>('Chưa nhận lại');
   const [correctionReason, setCorrectionReason] = useState('');
   const [correctionEvidence, setCorrectionEvidence] = useState('');
+  const [mismatchNoticeSent, setMismatchNoticeSent] = useState(false);
 
   // ==================== STATE UC-BG10: THEO DÕI ĐỐI SOÁT CỌC ====================
   const matchingSettlementSlip = settlementSlips.find(s => s.roomCode === selectedRoomCode);
   const [bg10WaitingReason, setBg10WaitingReason] = useState('');
+  const [showQT05DetailModal, setShowQT05DetailModal] = useState(false);
 
   // ==================== STATE UC-BG11: HOÀN THIỆN BIÊN BẢN TRẢ PHÒNG ====================
   const [bg11TenantSigned, setBg11TenantSigned] = useState<'Khách đã ký' | 'Chưa ký' | 'Khách không ký'>(
@@ -321,7 +331,7 @@ export const HandoverAssetsView: React.FC = () => {
   const [bg11ScanUrl, setBg11ScanUrl] = useState<string>(existingReturnReport?.signedDocumentScanUrl || '');
   const [showConfirm324Modal, setShowConfirm324Modal] = useState(false);
 
-  // Update inventory items when room changes
+  // Update inventory items and BG07 state when room changes
   const handleRoomChange = (roomCode: string) => {
     setSelectedRoomCode(roomCode);
     const existing = inventoryRecords.find(i => i.roomCode === roomCode);
@@ -340,6 +350,30 @@ export const HandoverAssetsView: React.FC = () => {
         notes: ''
       })));
     }
+    const compRes = assetComparisonResults.find(r => r.roomCode === roomCode);
+    if (compRes) {
+      setBg07HasPendingWork(compRes.hasPendingWork);
+      setBg07PendingWorkNote(compRes.pendingWorkNote || '');
+      setBg07SolutionPlan(compRes.solutionPlan || '');
+      setBg07OwnerOpinion(compRes.ownerOpinion || 'Chủ nhà yêu cầu bảo quản và bàn giao đủ số lượng.');
+      setBg07TenantOpinion(compRes.tenantOpinion || 'Khách thuê đã kiểm tra cùng chủ nhà lúc trả phòng.');
+      setBg07TenantFeedbackStatus(compRes.tenantFeedbackStatus || 'Đã phản hồi');
+      setBg07UnanimousStatus(compRes.unanimousStatus || 'Đã thống nhất');
+      setBg07CompensationAmount(compRes.compensationAmount || 0);
+      setBg07ContactLogs(compRes.contactHistory || []);
+      setStep318Transferred(Boolean(compRes.transferredToSettlement318));
+    } else {
+      setBg07HasPendingWork(false);
+      setBg07PendingWorkNote('');
+      setBg07SolutionPlan('');
+      setBg07OwnerOpinion('Chủ nhà yêu cầu bảo quản và bàn giao đủ số lượng.');
+      setBg07TenantOpinion('Khách thuê đã kiểm tra cùng chủ nhà lúc trả phòng.');
+      setBg07TenantFeedbackStatus('Đã phản hồi');
+      setBg07UnanimousStatus('Đã thống nhất');
+      setBg07CompensationAmount(0);
+      setStep318Transferred(false);
+    }
+    setBg07SaveError(null);
   };
 
   // Compute quantityDiff based on standard and actual
@@ -2072,12 +2106,83 @@ export const HandoverAssetsView: React.FC = () => {
           ? comparisonItems.some((i: { diffResult: string }) => i.diffResult === 'Khác biệt')
           : (existingCompResult?.hasDifference ?? false);
 
+        const hasBG06Comparison = comparisonItems.length > 0 || Boolean(existingCompResult);
+
         // Verification condition for "Không liên hệ được" (BR-UC.BG.07-12)
         // Must have at least 2 unsuccessful contact attempts and >= 48 hours from 1st attempt
         const failedLogs = bg07ContactLogs.filter(l => l.result.toLowerCase().includes('không') || l.result.toLowerCase().includes('chưa'));
         const firstLogTime = bg07ContactLogs.length > 0 ? new Date(bg07ContactLogs[0].date).getTime() : Date.now();
         const hoursElapsed = (Date.now() - firstLogTime) / (1000 * 3600);
         const canMarkUnreachable = failedLogs.length >= 2 && hoursElapsed >= 48;
+
+        const handleSaveBG07 = () => {
+          // Validations EF-01, EF-02 & EF-05
+          if (!hasBG06Comparison) {
+            showToast('error', 'EF-01: Chưa có kết quả so sánh tài sản từ UC-BG06. Không ghi kết luận tùy ý.');
+            return;
+          }
+          if (hasDiffFromBG06 && bg07HasPendingWork && !bg07PendingWorkNote.trim()) {
+            showToast('error', 'EF-02: BG06 xác định có chênh lệch thực tế, vui lòng nhập nội dung phát sinh cần xử lý.');
+            return;
+          }
+          if (hasDiffFromBG06 && !bg07HasPendingWork && !bg07PendingWorkNote.trim()) {
+            showToast('error', 'BR-07-05: Khi có chênh lệch mà chọn không còn xử lý, bắt buộc phải ghi căn cứ đã xử lý.');
+            return;
+          }
+          if (bg07TenantFeedbackStatus !== 'Đã phản hồi' && bg07UnanimousStatus === 'Đã thống nhất') {
+            showToast('error', 'EF-05: Khách chưa phản hồi hoặc không liên hệ được, không thể lưu trạng thái "Đã thống nhất" (không suy đoán im lặng là đồng ý - BR-UC.BG.07-08).');
+            return;
+          }
+          const hasValidBG05 = Boolean(bg05AuditStamp || existingCompResult?.bg05AuditStamp);
+          if (!hasValidBG05 && bg07UnanimousStatus === 'Đã thống nhất') {
+            showToast('error', 'EF-05: Chưa có dấu tra cứu sự cố BG05 hợp lệ cùng phiên bản nguồn. Vui lòng đối soát BG05 trước hoặc chọn lại tình trạng thực tế.');
+            return;
+          }
+
+          try {
+            if (bg07SimulateSaveFailure) {
+              throw new Error('Lỗi kết nối cơ sở dữ liệu khi lưu kết quả đối chiếu tài sản (Mô phỏng lỗi lưu EF-04). Dữ liệu nhập được bảo toàn nguyên vẹn.');
+            }
+
+            const result: AssetComparisonResult = {
+              id: existingCompResult?.id || 'comp_' + selectedRoomCode.replace(/\D/g, '') + '_' + Date.now().toString().slice(-4),
+              roomCode: selectedRoomCode,
+              leaseId: targetContract?.leaseId || selectedRoom.currentLeaseId || 'THUE-' + selectedRoomCode + '-L1',
+              contractId: targetContract?.id,
+              hasDifference: hasDiffFromBG06,
+              hasPendingWork: bg07HasPendingWork,
+              pendingWorkNote: bg07PendingWorkNote,
+              solutionPlan: bg07SolutionPlan,
+              ownerOpinion: bg07OwnerOpinion,
+              tenantOpinion: bg07TenantOpinion,
+              tenantFeedbackStatus: bg07TenantFeedbackStatus,
+              unanimousStatus: bg07UnanimousStatus,
+              compensationAmount: bg07CompensationAmount,
+              contactHistory: bg07ContactLogs,
+              contactAttemptsCount: bg07ContactLogs.length,
+              firstContactAt: bg07ContactLogs[0]?.date,
+              unreachableConfirmedAt: bg07TenantFeedbackStatus === 'Không liên hệ được' ? new Date().toISOString() : undefined,
+              unreachableConfirmedBy: bg07TenantFeedbackStatus === 'Không liên hệ được' ? (currentUser?.fullName || 'Chủ nhà') : undefined,
+              transferredToSettlement318: step318Transferred,
+              transferredAt: step318Transferred ? (existingCompResult?.transferredAt || new Date().toISOString()) : undefined,
+              bg05AuditStamp: bg05AuditStamp || existingCompResult?.bg05AuditStamp || 'AUDIT-BG05-VALID',
+              version: (existingCompResult?.version || 1),
+              loggedAt: new Date().toISOString()
+            };
+
+            saveAssetComparisonResultBG07(result);
+            setBg07SaveError(null);
+            if (step318Transferred) {
+              showToast('success', 'Đã lưu kết quả đối chiếu tài sản (UC-BG07) và ghi nhận chuyển thông tin Bước 3.18!');
+            } else {
+              showToast('info', 'Đã lưu kết quả đối chiếu tài sản (UC-BG07). Nhắc nhở: Hãy thực hiện bàn giao thông tin sang Bước 3.18 ngoài hệ thống.');
+            }
+          } catch (err: any) {
+            // EF-04: Giữ dữ liệu nhập, thông báo lỗi và nút Thử lại
+            setBg07SaveError(err.message || 'EF-04: Lỗi lưu kết quả đối chiếu. Toàn bộ thông tin bạn đã nhập được bảo toàn nguyên vẹn.');
+            showToast('error', 'EF-04: Lỗi lưu kết quả đối chiếu! Hệ thống đã giữ nguyên vẹn dữ liệu nhập.');
+          }
+        };
 
         return (
           <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-5 space-y-4 text-xs">
@@ -2093,7 +2198,39 @@ export const HandoverAssetsView: React.FC = () => {
                 </p>
               </div>
 
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  onClick={() => {
+                    // EF-03: Tải lại để đối chiếu thông tin mới; tránh mất ý kiến đã ghi
+                    const compRes = assetComparisonResults.find(r => r.roomCode === selectedRoomCode);
+                    if (compRes) {
+                      setBg07HasPendingWork(compRes.hasPendingWork);
+                      setBg07PendingWorkNote(compRes.pendingWorkNote || '');
+                      setBg07SolutionPlan(compRes.solutionPlan || '');
+                      setBg07OwnerOpinion(compRes.ownerOpinion || 'Chủ nhà yêu cầu bảo quản và bàn giao đủ số lượng.');
+                      setBg07TenantOpinion(compRes.tenantOpinion || 'Khách thuê đã kiểm tra cùng chủ nhà lúc trả phòng.');
+                      setBg07TenantFeedbackStatus(compRes.tenantFeedbackStatus || 'Đã phản hồi');
+                      setBg07UnanimousStatus(compRes.unanimousStatus || 'Đã thống nhất');
+                      setBg07CompensationAmount(compRes.compensationAmount || 0);
+                      setBg07ContactLogs(compRes.contactHistory || []);
+                      setStep318Transferred(Boolean(compRes.transferredToSettlement318));
+                    }
+                    setBg07SaveError(null);
+                    showToast('info', 'EF-03: Đã tải lại dữ liệu đối chiếu mới nhất từ UC-BG06 và UC-BG05 thành công.');
+                  }}
+                  className="px-2.5 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg font-medium flex items-center gap-1 cursor-pointer"
+                  title="Tải lại để đối chiếu thông tin mới (EF-03)"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                  <span>Tải lại (EF-03)</span>
+                </button>
+                <button
+                  onClick={() => setShowAF03SettlementModal(true)}
+                  className="px-3 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 rounded-lg font-semibold flex items-center gap-1 cursor-pointer"
+                >
+                  <Search className="w-3.5 h-3.5" />
+                  <span>Tham chiếu quyết toán QT05 (AF-03)</span>
+                </button>
                 <button
                   onClick={() => setActiveTab('compare_bg06')}
                   className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg font-semibold flex items-center gap-1 cursor-pointer"
@@ -2111,6 +2248,25 @@ export const HandoverAssetsView: React.FC = () => {
               </div>
             </div>
 
+            {/* EF-01: Chưa có kết quả so sánh tài sản */}
+            {!hasBG06Comparison && (
+              <div className="p-3.5 bg-rose-50 border border-rose-200 rounded-xl text-rose-900 text-xs flex items-start gap-2">
+                <AlertOctagon className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                <div className="space-y-1">
+                  <strong className="block">EF-01: Chưa có kết quả so sánh tài sản từ UC-BG06</strong>
+                  <p>
+                    Quy tắc nghiệp vụ yêu cầu thực hiện đối chiếu tại UC-BG06 trước khi ghi nhận kết quả; không ghi kết luận tùy ý khi chưa có bảng đối chiếu nguồn.
+                  </p>
+                  <button
+                    onClick={() => setActiveTab('compare_bg06')}
+                    className="mt-1 px-3 py-1 bg-rose-600 hover:bg-rose-700 text-white rounded font-semibold cursor-pointer"
+                  >
+                    Chuyển sang thực hiện đối chiếu tại UC-BG06
+                  </button>
+                </div>
+              </div>
+            )}
+
             {/* Read-Only Source Banner (Giao diện mục 2) */}
             <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl grid grid-cols-2 md:grid-cols-4 gap-3 text-slate-700">
               <div>
@@ -2127,6 +2283,7 @@ export const HandoverAssetsView: React.FC = () => {
                 <span className="font-mono text-slate-800 font-semibold">
                   {bg05AuditStamp || existingCompResult?.bg05AuditStamp || 'Đã đối soát hợp lệ (BG05-OK)'}
                 </span>
+                <span className="text-[10px] text-slate-400 block mt-0.5">* BR-07-06: kế thừa hoặc kiểm tra nguồn</span>
               </div>
               <div>
                 <span className="text-slate-500 block text-[11px]">Biên bản nhận BG03:</span>
@@ -2142,6 +2299,66 @@ export const HandoverAssetsView: React.FC = () => {
               </div>
             </div>
 
+            {/* EF-04 Error Banner: Lỗi khi lưu kết quả đối chiếu -> Giữ dữ liệu nhập, thông báo lỗi và nút Thử lại */}
+            {bg07SaveError && (
+              <div className="p-3.5 bg-rose-50 border border-rose-300 rounded-xl text-rose-900 text-xs flex items-start gap-2.5 shadow-xs">
+                <AlertOctagon className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                <div className="space-y-1.5 flex-1">
+                  <div className="flex items-center justify-between">
+                    <strong className="block text-rose-800 font-bold">EF-04: Lỗi lưu kết quả đối chiếu tài sản</strong>
+                    <span className="text-[10px] bg-rose-200 text-rose-900 px-2 py-0.5 rounded font-bold">Dữ liệu đã nhập được bảo toàn nguyên vẹn</span>
+                  </div>
+                  <p className="text-slate-700">{bg07SaveError}</p>
+                  <div className="pt-1 flex items-center gap-2">
+                    <button
+                      onClick={() => {
+                        setBg07SaveError(null);
+                        setBg07SimulateSaveFailure(false);
+                        handleSaveBG07();
+                      }}
+                      className="px-3 py-1.5 bg-rose-600 hover:bg-rose-700 text-white rounded-lg font-bold cursor-pointer flex items-center gap-1.5 shadow-xs"
+                    >
+                      <RotateCcw className="w-3.5 h-3.5" />
+                      <span>Thử lại ngay (EF-04)</span>
+                    </button>
+                    <button
+                      onClick={() => setBg07SaveError(null)}
+                      className="px-2.5 py-1.5 bg-white hover:bg-slate-50 border border-rose-300 text-slate-700 rounded-lg font-medium cursor-pointer"
+                    >
+                      Đóng
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* AF-01 Banner: Không còn nội dung chênh lệch cần xử lý */}
+            {!bg07HasPendingWork && (
+              <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl text-emerald-900 text-[11px] space-y-1">
+                <div className="flex items-center gap-1.5 font-bold">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                  <span>AF-01 / Bước 3.17: Kết luận "Không còn nội dung cần xử lý"</span>
+                </div>
+                <p>
+                  Bước 3.17 ghi kết luận <strong>Không còn nội dung cần xử lý</strong>.
+                  Lưu ý: Kết luận này <strong>không đồng nghĩa không cần hoàn trả/đối soát tiền cọc ban đầu tại ASIS-05</strong> (BR-UC.BG.07-01 &amp; 07). Khoản cọc gốc vẫn phải được chuyển sang Bước 3.18 ngoài hệ thống để thực hiện quyết toán.
+                </p>
+              </div>
+            )}
+
+            {/* AF-02 Banner: Hai bên chưa thống nhất */}
+            {bg07UnanimousStatus === 'Chưa thống nhất' && (
+              <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-amber-900 text-[11px] space-y-1">
+                <div className="flex items-center gap-1.5 font-bold">
+                  <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
+                  <span>AF-02: Hai bên chưa thống nhất về trách nhiệm, số lượng hoặc phương án xử lý</span>
+                </div>
+                <p>
+                  Hệ thống <strong>lưu nguyên văn ý kiến của từng bên và tình trạng đang chờ</strong>, không tự gán đã chấp thuận hay đã thanh toán (BR-UC.BG.07-02). Hồ sơ chuyển sang Bước 3.18 nhưng vẫn giữ cờ Chưa thống nhất (BR-UC.BG.07-13).
+                </p>
+              </div>
+            )}
+
             {/* Form Inputs (Giao diện mục 3) */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               {/* Cột trái: Đánh giá nội dung cần xử lý & Trách nhiệm */}
@@ -2151,7 +2368,7 @@ export const HandoverAssetsView: React.FC = () => {
                     <label className="font-semibold text-slate-700">
                       Còn nội dung cần xử lý? <span className="text-red-500">*</span>
                     </label>
-                    <span className="text-[10px] text-slate-400">(Trạng thái nghiệp vụ tại BG07)</span>
+                    <span className="text-[10px] text-slate-400">(Trạng thái nghiệp vụ tại BG07 - BR-07-05)</span>
                   </div>
                   <select
                     value={bg07HasPendingWork ? 'Có' : 'Không'}
@@ -2215,7 +2432,7 @@ export const HandoverAssetsView: React.FC = () => {
                     className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white font-mono font-bold text-blue-700"
                   />
                   <span className="text-[10px] text-slate-500 block">
-                    * <strong>BR-UC.BG.07-03:</strong> Chi phí bồi thường này chỉ là thông tin User ghi nhận, <strong>KHÔNG mặc nhiên là khoản phải thu hay khoản khấu trừ cọc</strong>. Việc cấn trừ tiền cọc do Quy trình 5 xử lý độc lập.
+                    * <strong>BR-UC.BG.07-03 &amp; 10:</strong> Chi phí bồi thường này chỉ là thông tin User ghi nhận, <strong>KHÔNG mặc nhiên là khoản phải thu hay khoản khấu trừ cọc</strong>. Việc cấn trừ tiền cọc do Quy trình 5 xử lý độc lập; BG07 không tạo giao dịch tiền.
                   </span>
                 </div>
               </div>
@@ -2234,12 +2451,12 @@ export const HandoverAssetsView: React.FC = () => {
                 </div>
 
                 <div>
-                  <label className="block font-semibold text-slate-700 mb-1">Ý kiến khách thuê (User ghi nhận)</label>
+                  <label className="block font-semibold text-slate-700 mb-1">Ý kiến khách thuê (User ghi nhận do khách trao đổi)</label>
                   <textarea
                     rows={2}
                     value={bg07TenantOpinion}
                     onChange={(e) => setBg07TenantOpinion(e.target.value)}
-                    placeholder="Ghi lại nguyên văn ý kiến của khách thuê khi trao đổi..."
+                    placeholder="Ghi lại nguyên văn ý kiến của khách thuê khi trao đổi (giữ nguyên khi chưa thống nhất)..."
                     className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-xs"
                   />
                 </div>
@@ -2266,8 +2483,8 @@ export const HandoverAssetsView: React.FC = () => {
                       className="w-full px-2 py-1.5 border border-slate-300 rounded text-xs font-semibold bg-white"
                     >
                       <option value="Đã phản hồi">Đã phản hồi</option>
-                      <option value="Chưa phản hồi">Chưa phản hồi</option>
-                      <option value="Không liên hệ được">Không liên hệ được</option>
+                      <option value="Chưa phản hồi">Chưa phản hồi (AF-04)</option>
+                      <option value="Không liên hệ được">Không liên hệ được (&ge;48h, &ge;2 lượt)</option>
                     </select>
                   </div>
 
@@ -2280,7 +2497,7 @@ export const HandoverAssetsView: React.FC = () => {
                       onChange={(e) => {
                         const val = e.target.value as any;
                         if (val === 'Đã thống nhất' && bg07TenantFeedbackStatus !== 'Đã phản hồi') {
-                          showToast('error', 'EF-05: Khách chưa phản hồi hoặc không liên hệ được thì KHÔNG được chọn "Đã thống nhất" (không suy im lặng là đồng ý).');
+                          showToast('error', 'EF-05: Khách chưa phản hồi hoặc không liên hệ được thì KHÔNG được chọn "Đã thống nhất" (không suy im lặng là đồng ý - BR-UC.BG.07-08).');
                           return;
                         }
                         setBg07UnanimousStatus(val);
@@ -2288,13 +2505,13 @@ export const HandoverAssetsView: React.FC = () => {
                       className="w-full px-2 py-1.5 border border-slate-300 rounded text-xs font-semibold bg-white"
                     >
                       <option value="Đã thống nhất">Đã thống nhất</option>
-                      <option value="Chưa thống nhất">Chưa thống nhất</option>
+                      <option value="Chưa thống nhất">Chưa thống nhất (AF-02)</option>
                       <option value="Chưa xác định">Chưa xác định</option>
                     </select>
                   </div>
                 </div>
 
-                {/* Contact Attempts summary */}
+                {/* Contact Attempts summary (AF-04) */}
                 <div className="space-y-1.5">
                   <div className="flex items-center justify-between">
                     <span className="font-semibold text-slate-700 text-[11px]">
@@ -2321,16 +2538,51 @@ export const HandoverAssetsView: React.FC = () => {
               </div>
             </div>
 
-            {/* Bước 3.18 Reminder Notice (BR-UC.BG.07-04 & 11, EF-06) */}
-            <div className="p-3 bg-indigo-50 border border-indigo-200 rounded-xl text-indigo-900 text-[11px] space-y-1">
-              <div className="flex items-center gap-1.5 font-bold">
-                <Info className="w-4 h-4 text-indigo-600 shrink-0" />
-                <span>Nhắc nhở bàn giao thông tin sang Bước 3.18 ngoài hệ thống:</span>
+            {/* Bước 3.18 & EF-06: Chuyển thông tin đối chiếu sang Quyết toán cọc ngoài hệ thống */}
+            <div className="p-3.5 bg-indigo-50 border border-indigo-200 rounded-xl space-y-2 text-indigo-950 text-xs">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-1.5 font-bold">
+                  <Info className="w-4 h-4 text-indigo-600 shrink-0" />
+                  <span>Bước 3.18: Chuyển thông tin sang Quy trình 5 – Quyết toán cọc ngoài hệ thống (BR-UC.BG.07-04 &amp; 11):</span>
+                </div>
+                <span className="text-[10px] font-mono bg-indigo-200/70 text-indigo-900 px-2 py-0.5 rounded font-bold">
+                  Bàn giao nghiệp vụ ngoài phần mềm
+                </span>
               </div>
-              <p>
-                Sau khi lưu kết quả đối chiếu, <strong>Chủ nhà thực hiện chuyển thông tin đối chiếu và tiền cọc sang Quy trình 5 – Quyết toán cọc tại bước 3.18 ngoài hệ thống</strong> (gồm mã phòng, hợp đồng, lần thuê, kết quả đối chiếu, phiên bản hồ sơ).
-                Hệ thống <strong>không tự động mở hay tự tạo hồ sơ quyết toán cọc</strong> (BR-UC.BG.07-04).
+              <p className="text-[11px] text-indigo-900">
+                Thông tin chuyển tại bước 3.18 gồm: mã phòng <strong>{selectedRoomCode}</strong>, hợp đồng <strong>{targetContract?.id || 'HD-' + selectedRoomCode}</strong>, lần thuê <strong>{targetContract?.leaseId || selectedRoom.currentLeaseId}</strong>, kết quả đối chiếu, sự cố liên quan và phiên bản hồ sơ.
+                Sau đó, hồ sơ quyết toán cọc sử dụng dữ liệu này để đối chiếu, <strong>không tự khởi tạo từ BG07</strong> (BR-UC.BG.07-04).
               </p>
+              
+              <div className="p-2.5 bg-white border border-indigo-200 rounded-lg flex items-center justify-between">
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={step318Transferred}
+                    onChange={(e) => setStep318Transferred(e.target.checked)}
+                    className="w-4 h-4 text-indigo-600 rounded"
+                  />
+                  <div>
+                    <span className="font-bold text-slate-800 block text-[11px]">
+                      Chủ nhà đã hoàn tất bàn giao thông tin sang Bước 3.18 ngoài hệ thống
+                    </span>
+                    <span className="text-[10px] text-slate-500">
+                      {step318Transferred ? `Đã xác nhận bàn giao thông tin nghiệp vụ.` : `Chưa hoàn tất bước 3.18 ngoài hệ thống.`}
+                    </span>
+                  </div>
+                </label>
+                <span className={`text-[10px] font-bold px-2 py-0.5 rounded ${
+                  step318Transferred ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'
+                }`}>
+                  {step318Transferred ? 'Đã chuyển 3.18' : 'Nhắc việc: Chưa chuyển 3.18 (EF-06)'}
+                </span>
+              </div>
+
+              {!step318Transferred && (
+                <div className="text-[10px] text-amber-800 bg-amber-50 p-2 rounded border border-amber-200">
+                  * <strong>EF-06:</strong> Kết quả đã lưu vẫn được giữ nguyên. Hồ sơ ghi chú chưa hoàn tất việc chuyển thông tin để Chủ nhà tiếp tục xử lý; BG07 không tự mở hoặc tự tạo hồ sơ quyết toán cọc. Việc chờ quyết toán không thay đổi kết quả nhận lại phòng đã được xác nhận ở bước 3.05.
+                </div>
+              )}
             </div>
 
             {/* Actions */}
@@ -2342,53 +2594,23 @@ export const HandoverAssetsView: React.FC = () => {
                 &larr; Quay lại đối chiếu BG06
               </button>
 
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
+                <label className="flex items-center gap-1.5 text-[11px] text-slate-500 bg-slate-50 border border-slate-200 px-2 py-1.5 rounded-lg cursor-pointer hover:bg-slate-100" title="Bật để kiểm thử Luồng ngoại lệ EF-04: Lỗi lưu kết quả đối chiếu">
+                  <input
+                    type="checkbox"
+                    checked={bg07SimulateSaveFailure}
+                    onChange={(e) => setBg07SimulateSaveFailure(e.target.checked)}
+                    className="w-3.5 h-3.5 text-rose-600 rounded"
+                  />
+                  <span>Mô phỏng lỗi lưu (EF-04)</span>
+                </label>
+
                 <button
-                  onClick={() => {
-                    // Validations EF-02 & EF-05
-                    if (hasDiffFromBG06 && bg07HasPendingWork && !bg07PendingWorkNote.trim()) {
-                      showToast('error', 'EF-02: BG06 xác định có chênh lệch thực tế, vui lòng nhập nội dung phát sinh cần xử lý.');
-                      return;
-                    }
-                    if (hasDiffFromBG06 && !bg07HasPendingWork && !bg07PendingWorkNote.trim()) {
-                      showToast('error', 'BR-07-05: Khi có chênh lệch mà chọn không còn xử lý, bắt buộc phải ghi căn cứ đã xử lý.');
-                      return;
-                    }
-                    if (bg07TenantFeedbackStatus !== 'Đã phản hồi' && bg07UnanimousStatus === 'Đã thống nhất') {
-                      showToast('error', 'EF-05: Khách chưa phản hồi hoặc không liên hệ được, không thể lưu trạng thái "Đã thống nhất".');
-                      return;
-                    }
-
-                    const result: AssetComparisonResult = {
-                      id: existingCompResult?.id || 'comp_' + selectedRoomCode.replace(/\D/g, '') + '_' + Date.now().toString().slice(-4),
-                      roomCode: selectedRoomCode,
-                      leaseId: targetContract?.leaseId || selectedRoom.currentLeaseId || 'THUE-' + selectedRoomCode + '-L1',
-                      contractId: targetContract?.id,
-                      hasDifference: hasDiffFromBG06,
-                      hasPendingWork: bg07HasPendingWork,
-                      pendingWorkNote: bg07PendingWorkNote,
-                      solutionPlan: bg07SolutionPlan,
-                      ownerOpinion: bg07OwnerOpinion,
-                      tenantOpinion: bg07TenantOpinion,
-                      tenantFeedbackStatus: bg07TenantFeedbackStatus,
-                      unanimousStatus: bg07UnanimousStatus,
-                      compensationAmount: bg07CompensationAmount,
-                      contactHistory: bg07ContactLogs,
-                      contactAttemptsCount: bg07ContactLogs.length,
-                      firstContactAt: bg07ContactLogs[0]?.date,
-                      unreachableConfirmedAt: bg07TenantFeedbackStatus === 'Không liên hệ được' ? new Date().toISOString() : undefined,
-                      unreachableConfirmedBy: bg07TenantFeedbackStatus === 'Không liên hệ được' ? (currentUser?.fullName || 'Chủ nhà') : undefined,
-                      transferredToSettlement318: true,
-                      transferredAt: new Date().toISOString(),
-                      bg05AuditStamp: bg05AuditStamp || 'AUDIT-BG05-VALID',
-                      version: (existingCompResult?.version || 1),
-                      loggedAt: new Date().toISOString()
-                    };
-
-                    saveAssetComparisonResultBG07(result);
-                    showToast('success', 'Đã lưu kết quả đối chiếu tài sản thành công (UC-BG07)! Hãy chuyển giao thông tin sang bước 3.18 ngoài hệ thống.');
-                  }}
-                  className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-semibold cursor-pointer shadow-xs"
+                  disabled={!hasBG06Comparison}
+                  onClick={handleSaveBG07}
+                  className={`px-4 py-2 rounded-lg font-semibold cursor-pointer shadow-xs ${
+                    hasBG06Comparison ? 'bg-indigo-600 hover:bg-indigo-700 text-white' : 'bg-slate-300 text-slate-500 cursor-not-allowed'
+                  }`}
                 >
                   Lưu kết quả đối chiếu (Bước 4)
                 </button>
@@ -2416,6 +2638,18 @@ export const HandoverAssetsView: React.FC = () => {
         const hasReceiveReport = Boolean(existingReport);
         const isReceiveReportConfirmed = Boolean(existingReport && existingReport.status === 'Đã xác nhận');
 
+        const selectedContract = contracts.find(c => c.id === bg08SelectedContractId) || targetContract;
+        const isHistoricContractConflict = Boolean(
+          selectedContract &&
+          selectedContract.status === 'Kết thúc' &&
+          targetContract &&
+          targetContract.id !== selectedContract.id
+        );
+
+        // Trạng thái nguồn biên bản nhận (Giao diện mục 6)
+        const sourceReportStatus: 'Hợp lệ' | 'Chưa xác minh' | 'Thiếu hồ sơ nhận phòng' =
+          isReceiveReportConfirmed ? 'Hợp lệ' : existingReport ? 'Chưa xác minh' : 'Thiếu hồ sơ nhận phòng';
+
         return (
           <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-5 space-y-4 text-xs">
             {/* Header */}
@@ -2426,25 +2660,47 @@ export const HandoverAssetsView: React.FC = () => {
                   <h2 className="text-sm font-bold text-slate-900">Khởi tạo biên bản trả phòng (Bước 3.02): {selectedRoomCode}</h2>
                 </div>
                 <p className="text-slate-500 mt-0.5">
-                  Khởi tạo biên bản trả phòng sau sự kiện khách tiến hành bàn giao (3.01). Hồ sơ ban đầu lưu ở trạng thái NHÁP, chưa phải bản ký chính thức (BR-UC.BG.08-02).
+                  Khởi tạo biên bản trả phòng sau sự kiện khách tiến hành bàn giao (3.01). Hồ sơ ban đầu lưu ở trạng thái <strong>NHÁP</strong>, chưa phải bản ký chính thức (BR-UC.BG.08-02).
                 </p>
               </div>
 
-              {existingReturnReport && (
-                <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className={`px-2.5 py-1 rounded text-xs font-bold border ${
+                  sourceReportStatus === 'Hợp lệ'
+                    ? 'bg-emerald-50 text-emerald-800 border-emerald-300'
+                    : sourceReportStatus === 'Chưa xác minh'
+                    ? 'bg-amber-50 text-amber-800 border-amber-300'
+                    : 'bg-rose-50 text-rose-800 border-rose-300'
+                }`}>
+                  Trạng thái nguồn BG03: {sourceReportStatus}
+                </span>
+
+                {existingReturnReport && (
                   <span className="font-mono bg-blue-50 text-blue-800 font-bold px-2.5 py-1 rounded border border-blue-200">
                     Mã hiện hành: {existingReturnReport.reportNumber} ({existingReturnReport.status})
                   </span>
-                </div>
-              )}
+                )}
+              </div>
             </div>
 
-            {/* Check Source BG03 */}
+            {/* Check Source BG03 (AF-02 & BR-UC.BG.08-01 & 05) */}
             {!isReceiveReportConfirmed && (
-              <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-amber-900 text-[11px] space-y-1">
-                <div className="flex items-center gap-1.5 font-bold">
-                  <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
-                  <span>Cảnh báo thiếu hồ sơ biên bản nhận phòng BG03 (AF-02 &amp; BR-UC.BG.08-01 &amp; 05):</span>
+              <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-amber-900 text-[11px] space-y-2">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-1.5 font-bold">
+                    <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
+                    <span>Cảnh báo thiếu hồ sơ biên bản nhận phòng BG03 (AF-02 &amp; BR-UC.BG.08-01 &amp; 05):</span>
+                  </div>
+                  <button
+                    onClick={() => {
+                      setActiveTab('handover_bg03');
+                      showToast('info', 'Chuyển sang xem hồ sơ nhận phòng BG03 (AF-02).');
+                    }}
+                    className="px-2.5 py-1 bg-amber-200 hover:bg-amber-300 text-amber-900 rounded font-semibold flex items-center gap-1 cursor-pointer"
+                  >
+                    <Eye className="w-3.5 h-3.5" />
+                    <span>Xem hồ sơ nhận phòng (AF-02)</span>
+                  </button>
                 </div>
                 <p>
                   Chưa tìm thấy hoặc biên bản nhận phòng BG03 chưa có đủ 2 chữ ký tay xác nhận. Hệ thống vẫn cho phép khởi tạo biên bản trả phòng ở trạng thái <strong>Nháp</strong> để ghi nhận thực tế, nhưng sẽ <strong>gắn cờ Thiếu biên bản nhận</strong> và khóa đối chiếu hoàn tất/xác nhận biên bản cuối cùng (BG06/BG11) cho đến khi hồ sơ gốc hợp lệ.
@@ -2452,17 +2708,71 @@ export const HandoverAssetsView: React.FC = () => {
               </div>
             )}
 
+            {/* EF-03 Alert if historical contract conflict */}
+            {isHistoricContractConflict && (
+              <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-rose-900 text-[11px] space-y-1">
+                <div className="flex items-center gap-1.5 font-bold">
+                  <AlertOctagon className="w-4 h-4 text-rose-600 shrink-0" />
+                  <span>EF-03: Chọn hợp đồng lịch sử trong khi phòng đã có lần thuê mới</span>
+                </div>
+                <p>
+                  Quy tắc BR-UC.BG.08-06 &amp; 08: Không cho phép lưu biên bản trả chính thức sai nguồn hoặc ghi đè hồ sơ hiện hành của người thuê mới. Với hồ sơ cũ, chỉ cho phép tra cứu/chuẩn bị thông tin có kiểm soát trên lịch sử đúng lần thuê.
+                </p>
+              </div>
+            )}
+
+            {/* AF-01 Existing Report Notice */}
+            {existingReturnReport && (
+              <div className="p-3 bg-blue-50 border border-blue-200 rounded-xl text-blue-900 text-[11px] flex items-center justify-between">
+                <div>
+                  <strong className="block text-blue-950">AF-01: Đã tồn tại biên bản trả phòng hiện hành cho lần thuê này</strong>
+                  <p className="text-blue-800">
+                    Số biên bản: <strong>{existingReturnReport.reportNumber}</strong> · Trạng thái: <strong>{existingReturnReport.status}</strong> · Ngày lập: {existingReturnReport.date}. Một lần thuê chỉ có 1 biên bản trả phòng hiện hành (BR-UC.BG.08-03).
+                  </p>
+                </div>
+                <button
+                  onClick={() => {
+                    showToast('info', `Mở biên bản trả phòng hiện hành ${existingReturnReport.reportNumber} (AF-01).`);
+                    setActiveTab('final_report_bg11');
+                  }}
+                  className="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-semibold shrink-0 cursor-pointer"
+                >
+                  Mở biên bản hiện có (AF-01)
+                </button>
+              </div>
+            )}
+
             {/* Form Fields (Giao diện mục 2 & 3) */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div className="space-y-3 p-4 bg-slate-50 border border-slate-200 rounded-xl">
                 <div>
-                  <label className="block font-semibold text-slate-700 mb-1">Mã phòng &amp; Lần thuê hiện hành (Chỉ xem)</label>
-                  <input
-                    type="text"
-                    disabled
-                    value={`${selectedRoom.roomCode} - Hợp đồng: ${targetContract?.id || 'HD-' + selectedRoom.roomCode} (${selectedRoom.currentLeaseId || 'THUE-' + selectedRoom.roomCode})`}
-                    className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-slate-100 font-mono text-slate-700"
-                  />
+                  <label className="block font-semibold text-slate-700 mb-1">
+                    Hợp đồng thuê cần trả phòng <span className="text-red-500">*</span> (Lọc đúng lần thuê)
+                  </label>
+                  <select
+                    value={bg08SelectedContractId || targetContract?.id || ''}
+                    onChange={(e) => {
+                      const cid = e.target.value;
+                      setBg08SelectedContractId(cid);
+                      const ct = contracts.find(c => c.id === cid);
+                      if (ct) {
+                        setBg08Giver(ct.tenantName);
+                      }
+                    }}
+                    className="w-full px-2.5 py-1.5 border border-slate-300 rounded-lg bg-white font-mono font-medium text-xs text-slate-800"
+                  >
+                    {contracts.filter(c => c.roomCode === selectedRoomCode).map(c => (
+                      <option key={c.id} value={c.id}>
+                        {c.id} · {c.tenantName} ({c.status}) [Lần thuê: {c.leaseId}]
+                      </option>
+                    ))}
+                    {contracts.filter(c => c.roomCode === selectedRoomCode).length === 0 && (
+                      <option value="">Không có hợp đồng nào thuộc phòng {selectedRoomCode}</option>
+                    )}
+                  </select>
+                  <span className="text-[10px] text-slate-400 block mt-0.5">
+                    * Mã phòng: <strong>{selectedRoom.roomCode}</strong> (Tầng {selectedRoom.floor}, {selectedRoom.area} m²)
+                  </span>
                 </div>
 
                 <div>
@@ -2471,7 +2781,7 @@ export const HandoverAssetsView: React.FC = () => {
                     type="date"
                     value={bg08Date}
                     onChange={(e) => setBg08Date(e.target.value)}
-                    className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white font-mono"
+                    className="w-full px-2.5 py-1.5 border border-slate-300 rounded-lg bg-white font-mono"
                   />
                 </div>
 
@@ -2482,7 +2792,7 @@ export const HandoverAssetsView: React.FC = () => {
                     value={bg08Place}
                     onChange={(e) => setBg08Place(e.target.value)}
                     placeholder="Tại phòng..."
-                    className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white"
+                    className="w-full px-2.5 py-1.5 border border-slate-300 rounded-lg bg-white"
                   />
                 </div>
               </div>
@@ -2490,21 +2800,21 @@ export const HandoverAssetsView: React.FC = () => {
               <div className="space-y-3 p-4 bg-slate-50 border border-slate-200 rounded-xl">
                 <div className="grid grid-cols-2 gap-3">
                   <div>
-                    <label className="block font-semibold text-slate-700 mb-1">Bên bàn giao (Khách) <span className="text-red-500">*</span></label>
+                    <label className="block font-semibold text-slate-700 mb-1">Bên bàn giao (Khách thuê) <span className="text-red-500">*</span></label>
                     <input
                       type="text"
                       value={bg08Giver}
                       onChange={(e) => setBg08Giver(e.target.value)}
-                      className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white font-medium"
+                      className="w-full px-2.5 py-1.5 border border-slate-300 rounded-lg bg-white font-medium"
                     />
                   </div>
                   <div>
-                    <label className="block font-semibold text-slate-700 mb-1">Bên nhận (Chủ nhà) <span className="text-red-500">*</span></label>
+                    <label className="block font-semibold text-slate-700 mb-1">Bên nhận (Chủ nhà/Quản lý) <span className="text-red-500">*</span></label>
                     <input
                       type="text"
                       value={bg08Receiver}
                       onChange={(e) => setBg08Receiver(e.target.value)}
-                      className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white font-medium"
+                      className="w-full px-2.5 py-1.5 border border-slate-300 rounded-lg bg-white font-medium"
                     />
                   </div>
                 </div>
@@ -2516,7 +2826,7 @@ export const HandoverAssetsView: React.FC = () => {
                     value={bg08Notes}
                     onChange={(e) => setBg08Notes(e.target.value)}
                     placeholder="Ghi nhận bối cảnh tiếp nhận trả phòng..."
-                    className="w-full px-3 py-2 border border-slate-300 rounded bg-white text-xs"
+                    className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-xs"
                   />
                 </div>
               </div>
@@ -2525,7 +2835,7 @@ export const HandoverAssetsView: React.FC = () => {
             {/* Reference Asset Table */}
             <div className="space-y-1.5">
               <span className="font-bold text-slate-800 text-[11px] uppercase tracking-wider block">
-                Danh sách tài sản tham chiếu từ đầu kỳ (Chỉ xem, nguồn đối chứng):
+                Danh sách tài sản tham chiếu từ đầu kỳ (Chỉ xem, nguồn đối chứng - BR-UC.BG.08-04):
               </span>
               <div className="overflow-x-auto border border-slate-200 rounded-xl max-h-48">
                 <table className="w-full text-left text-xs border-collapse">
@@ -2577,7 +2887,12 @@ export const HandoverAssetsView: React.FC = () => {
                   </button>
                 ) : (
                   <button
+                    disabled={isHistoricContractConflict}
                     onClick={() => {
+                      if (isHistoricContractConflict) {
+                        showToast('error', 'EF-03: Không cho lưu biên bản trả chính thức cho hợp đồng lịch sử khi phòng đã có lần thuê mới.');
+                        return;
+                      }
                       if (!bg08Giver.trim() || !bg08Receiver.trim() || !bg08Date) {
                         showToast('error', 'EF-02: Vui lòng nhập đầy đủ thông tin bên giao, bên nhận và ngày lập.');
                         return;
@@ -2587,8 +2902,8 @@ export const HandoverAssetsView: React.FC = () => {
                         id: 'ret_rep_' + selectedRoomCode.replace(/\D/g, '') + '_' + Date.now().toString().slice(-4),
                         reportNumber: 'BB-TRA-' + selectedRoomCode.replace(/\D/g, '') + '-2026',
                         roomCode: selectedRoomCode,
-                        leaseId: targetContract?.leaseId || selectedRoom.currentLeaseId || 'THUE-' + selectedRoomCode + '-L1',
-                        contractId: targetContract?.id || 'HD-' + selectedRoomCode + '-2026',
+                        leaseId: selectedContract?.leaseId || targetContract?.leaseId || selectedRoom.currentLeaseId || 'THUE-' + selectedRoomCode + '-L1',
+                        contractId: selectedContract?.id || targetContract?.id || 'HD-' + selectedRoomCode + '-2026',
                         status: 'Nháp',
                         missingReceiveReport: !isReceiveReportConfirmed,
                         initialConditionNotes: bg08Notes,
@@ -2608,7 +2923,11 @@ export const HandoverAssetsView: React.FC = () => {
                         showToast('success', res.message);
                       }
                     }}
-                    className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-semibold cursor-pointer shadow-xs"
+                    className={`px-4 py-2 rounded-lg font-semibold cursor-pointer shadow-xs ${
+                      !isHistoricContractConflict
+                        ? 'bg-blue-600 hover:bg-blue-700 text-white'
+                        : 'bg-slate-300 text-slate-500 cursor-not-allowed'
+                    }`}
                   >
                     Khởi tạo biên bản Nháp (Bước 3)
                   </button>
@@ -2621,7 +2940,7 @@ export const HandoverAssetsView: React.FC = () => {
                   }}
                   className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-semibold cursor-pointer flex items-center gap-1.5 shadow-xs"
                 >
-                  <span>Kiểm tra tài sản khi trả (BG09)</span>
+                  <span>Kiểm tra tài sản khi trả (Bước 4 &rarr; BG09)</span>
                   <ArrowRight className="w-4 h-4" />
                 </button>
               </div>
@@ -3715,6 +4034,145 @@ export const HandoverAssetsView: React.FC = () => {
               >
                 Lưu lượt liên hệ
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* =========================================================================
+          MODAL: TRA CỨU HỒ SƠ QUYẾT TOÁN CỌC ĐÃ TỒN TẠI (AF-03 / UC-BG07)
+      ========================================================================= */}
+      {showAF03SettlementModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4">
+          <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 max-w-xl w-full p-6 space-y-4 text-xs">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <div className="flex items-center gap-2">
+                <Search className="w-5 h-5 text-indigo-600" />
+                <div>
+                  <h3 className="font-bold text-slate-900 text-sm">Tra cứu hồ sơ quyết toán cọc đã tồn tại (AF-03)</h3>
+                  <span className="text-[11px] text-slate-500">Đối chiếu thông tin BG07 với Quy trình 5 – Phòng {selectedRoomCode}</span>
+                </div>
+              </div>
+              <button
+                onClick={() => setShowAF03SettlementModal(false)}
+                className="text-slate-400 hover:text-slate-600 p-1 rounded-lg hover:bg-slate-100 cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="space-y-3">
+              <div className="p-3 bg-slate-50 rounded-xl border border-slate-200 grid grid-cols-3 gap-2">
+                <div>
+                  <span className="text-slate-500 block text-[10px]">Phòng thuê:</span>
+                  <span className="font-bold text-slate-800">{selectedRoomCode}</span>
+                </div>
+                <div>
+                  <span className="text-slate-500 block text-[10px]">Hợp đồng:</span>
+                  <span className="font-mono text-slate-800 font-semibold">{targetContract?.id || 'HD-' + selectedRoomCode}</span>
+                </div>
+                <div>
+                  <span className="text-slate-500 block text-[10px]">Mã lần thuê:</span>
+                  <span className="font-mono text-slate-800 font-semibold">{targetContract?.leaseId || selectedRoom.currentLeaseId}</span>
+                </div>
+              </div>
+
+              {matchingSettlementSlip ? (
+                <div className="space-y-3">
+                  <div className="p-3 bg-indigo-50/70 border border-indigo-200 rounded-xl space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="font-bold text-indigo-950 text-xs">Hồ sơ quyết toán cọc (QT05) hiện có:</span>
+                      <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-indigo-200 text-indigo-900">
+                        {matchingSettlementSlip.status}
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2 text-[11px]">
+                      <div>
+                        <span className="text-slate-500 block">Mã hồ sơ:</span>
+                        <span className="font-mono font-bold text-slate-800">{matchingSettlementSlip.id}</span>
+                      </div>
+                      <div>
+                        <span className="text-slate-500 block">Cọc gốc ban đầu:</span>
+                        <span className="font-bold text-emerald-700">{matchingSettlementSlip.initialDepositAmount.toLocaleString()} đ</span>
+                      </div>
+                      <div>
+                        <span className="text-slate-500 block">Kết quả quyết toán tính toán:</span>
+                        <span className="font-bold text-blue-700">{matchingSettlementSlip.calculatedResult.toLocaleString()} đ</span>
+                      </div>
+                      <div>
+                        <span className="text-slate-500 block">Phản hồi của khách thuê:</span>
+                        <span className="font-semibold text-slate-700">{matchingSettlementSlip.tenantFeedback || 'Chưa ghi nhận'}</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-1.5">
+                    <span className="font-bold text-slate-800 text-xs block">Dữ liệu đối chiếu tài sản UC-BG07 đã lưu:</span>
+                    <div className="grid grid-cols-2 gap-2 text-[11px]">
+                      <div>
+                        <span className="text-slate-500 block">Mã đối chiếu:</span>
+                        <span className="font-mono font-semibold text-slate-800">{existingCompResult?.id || 'Chưa lưu'}</span>
+                      </div>
+                      <div>
+                        <span className="text-slate-500 block">Chênh lệch tài sản:</span>
+                        <span className={`font-semibold ${existingCompResult?.hasDifference ? 'text-rose-600' : 'text-emerald-600'}`}>
+                          {existingCompResult?.hasDifference ? 'Có chênh lệch' : 'Không có chênh lệch'}
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-slate-500 block">Chi phí bồi thường ghi nhận:</span>
+                        <span className="font-mono font-bold text-amber-700">
+                          {(existingCompResult?.compensationAmount || 0).toLocaleString()} đ
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-slate-500 block">Mức độ thống nhất:</span>
+                        <span className="font-semibold text-slate-800">{existingCompResult?.unanimousStatus || 'Chưa xác định'}</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="p-2.5 bg-amber-50 border border-amber-200 rounded-lg text-amber-900 text-[10px] space-y-1">
+                    <strong>* Quy tắc AF-03.1 &amp; BR-UC.BG.07-04:</strong>
+                    <p>
+                      Hệ thống hiển thị dữ liệu BG07 đã lưu để đối chiếu thông tin với hồ sơ quyết toán cọc hiện có. 
+                      <strong>Hệ thống KHÔNG tự tạo thêm hồ sơ hoặc giao dịch quyết toán cọc từ BG07</strong>.
+                    </p>
+                  </div>
+                </div>
+              ) : (
+                <div className="p-4 bg-slate-50 border border-dashed border-slate-300 rounded-xl text-center space-y-2">
+                  <FileSpreadsheet className="w-8 h-8 text-slate-400 mx-auto" />
+                  <strong className="block text-slate-700 text-xs">Chưa có hồ sơ quyết toán cọc cho hợp đồng/lần thuê này</strong>
+                  <p className="text-slate-500 text-[11px] max-w-sm mx-auto">
+                    Theo quy tắc AF-03.1: Nếu chưa có hồ sơ quyết toán cọc, Chủ nhà tiếp tục bước chuyển thông tin ngoài hệ thống tại bước 3.18. BG07 không tự mở hoặc tự tạo hồ sơ quyết toán cọc.
+                  </p>
+                </div>
+              )}
+            </div>
+
+            <div className="flex items-center justify-between pt-3 border-t border-slate-100">
+              <span className="text-[10px] text-slate-400">BR-UC.BG.07-04 &amp; 11</span>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setShowAF03SettlementModal(false)}
+                  className="px-3.5 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg font-medium cursor-pointer"
+                >
+                  Đóng
+                </button>
+                {matchingSettlementSlip && (
+                  <button
+                    onClick={() => {
+                      setShowAF03SettlementModal(false);
+                      setActiveTab('deposit_check_bg10');
+                    }}
+                    className="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-semibold cursor-pointer flex items-center gap-1"
+                  >
+                    <span>Xem chi tiết tại BG10</span>
+                    <ArrowRight className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
             </div>
           </div>
         </div>
